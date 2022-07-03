@@ -1,0 +1,12 @@
+[package]
+name = "engrish"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+ariadne = "0.1.5"
+chumsky = "0.8.0"
+combine = "*"
+serde = { version = "*", features = ["derive"]}
+thiserror = "1.0.31"
