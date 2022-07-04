@@ -1,6 +1,6 @@
 use ariadne::{Color, Fmt, Label, Report, ReportKind, Source};
 use chumsky::{prelude::Simple, Parser};
-use engrish::{eval, lexer, Value};
+use paris_lang::{eval, lexer, Value};
 use std::{collections::HashMap, env, fs};
 
 fn main() {
