@@ -1,7 +1,7 @@
 use ariadne::{Color, Fmt, Label, Report, ReportKind, Source};
 use chumsky::{prelude::Simple, Parser};
-use engrish::{eval, lexer};
-use std::{env, fs};
+use engrish::{eval, lexer, Value};
+use std::{collections::HashMap, env, fs};
 
 fn main() {
 	let src =
@@ -9,6 +9,7 @@ fn main() {
 			.expect("Failed to read file");
 
 	let (ast, mut errs) = lexer().parse_recovery(src.as_str());
+	let mut variables: HashMap<String, Value> = HashMap::new();
 
 	if let Some(ast) = ast.as_ref() {
 		if cfg!(debug_assertions) {
@@ -16,7 +17,7 @@ fn main() {
 		}
 
 		for node in ast {
-			match eval(&src.clone().into(), node) {
+			match eval(&src.clone().into(), node, &mut variables) {
 				Ok(val) => print!("{}", val),
 				Err(e) => errs.push(Simple::custom(e.1, e.0)),
 			}

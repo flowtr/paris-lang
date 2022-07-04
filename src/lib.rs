@@ -1,7 +1,7 @@
 use ariadne::Source;
 use chumsky::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum Value {
@@ -34,6 +34,7 @@ pub enum Node {
 	Call(Box<Spanned>, Vec<Spanned>),
 	While(Box<Spanned>, Vec<Spanned>),
 	Range(i64, i64),
+	Variable(String, Box<Spanned>),
 }
 
 pub type Spanned = (Node, Range<usize>);
@@ -71,16 +72,20 @@ pub fn lexer() -> impl Parser<char, Vec<Spanned>, Error = Simple<char>> {
 		},
 	);
 
-	let string = text::ident()
-		.delimited_by(just('`'), just('`'))
+	let string = just('`')
+		.ignore_then(filter(|c| *c != '\\' && *c != '`').repeated())
+		.then_ignore(just('`'))
 		.labelled("string")
+		.collect::<String>()
 		.map(Node::StringLiteral);
 
 	let boolean = just("true")
 		.or(just("false"))
 		.map(|b| Node::BooleanLiteral(b == "true"));
 
-	let ident = text::ident().labelled("identifier").map(Node::Ident);
+	let ident = text::ident()
+		.labelled("identifier")
+		.map_with_span(|ident, span| (Node::Ident(ident), span));
 
 	let op = one_of("=.:%,")
 		.repeated()
@@ -94,18 +99,31 @@ pub fn lexer() -> impl Parser<char, Vec<Spanned>, Error = Simple<char>> {
 
 		let func_call = text::ident()
 			.map_with_span(|name, span| (Node::Ident(name), span))
-			.then(tt_span.clone().separated_by(just(',')))
+			.then(
+				ident
+					.or(tt_span.clone())
+					.padded()
+					.separated_by(just(','))
+					.allow_trailing(),
+			)
 			.labelled("function call")
 			.map(|(name, args)| Node::Call(Box::new(name), args));
 
 		let block = tt_span
 			.clone()
-			.separated_by(just('.'))
-			.allow_trailing()
 			.padded()
+			.then_ignore(just('.').or(just(';')).or_not())
+			.repeated()
 			.or_not()
 			.delimited_by(just('{'), just('}'))
 			.labelled("block");
+
+		let variable = text::ident()
+			.padded()
+			.then_ignore(just(":=").padded())
+			.then(tt_span.clone().padded())
+			.labelled("variable")
+			.map(|(name, value)| Node::Variable(name, Box::new(value)));
 
 		let while_loop = just("while")
 			.padded()
@@ -122,15 +140,15 @@ pub fn lexer() -> impl Parser<char, Vec<Spanned>, Error = Simple<char>> {
 			.or(string)
 			.or(range)
 			.or(number)
-			.or(func_call)
+			.or(variable)
 			.or(op)
-			.or(ident)
+			.or(func_call)
 	})
 	.map_with_span(|n, span| (n, span));
 
 	tt.padded()
-		.separated_by(just('.').padded())
-		.allow_trailing()
+		.then_ignore(just('.').or(just(';')).or_not())
+		.repeated()
 		.then_ignore(end())
 }
 
@@ -138,8 +156,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum EvaluationError {
-	#[error("invalid function {0}")]
-	InvalidFunction(String),
+	#[error("function {0} not found")]
+	FunctionNotFound(String),
+	#[error("variable {0} not found")]
+	VariableNotFound(String),
 }
 
 pub type SpannedEvaluationError = (EvaluationError, Range<usize>);
@@ -147,6 +167,7 @@ pub type SpannedEvaluationError = (EvaluationError, Range<usize>);
 pub fn eval(
 	source: &Source,
 	node: &Spanned,
+	variables: &mut HashMap<String, Value>,
 ) -> Result<Value, SpannedEvaluationError> {
 	match &node.0 {
 		Node::Call(cname, args) => {
@@ -155,7 +176,7 @@ pub fn eval(
 					let mut result = String::new();
 
 					for arg in args {
-						let value = eval(source, arg)?;
+						let value = eval(source, arg, variables)?;
 
 						result += &value.to_string();
 					}
@@ -163,7 +184,7 @@ pub fn eval(
 					println!("{}", result);
 				} else {
 					return Err((
-						EvaluationError::InvalidFunction(name),
+						EvaluationError::FunctionNotFound(name),
 						cname.1.clone(),
 					));
 				}
@@ -174,14 +195,14 @@ pub fn eval(
 		Node::BooleanLiteral(b) => return Ok(Value::Boolean(*b)),
 		Node::Range(start, end) => return Ok(Value::Range(*start, *end)),
 		Node::While(cond, body) => {
-			let condition = eval(source, cond)?;
+			let condition = eval(source, cond, variables)?;
 
 			match condition {
 				Value::Number(n) => {
 					if n > 0.0 {
 						loop {
 							for node in body {
-								eval(source, node)?;
+								eval(source, node, variables)?;
 							}
 						}
 					}
@@ -190,7 +211,7 @@ pub fn eval(
 					if bool {
 						loop {
 							for node in body {
-								eval(source, node)?;
+								eval(source, node, variables)?;
 							}
 						}
 					}
@@ -198,11 +219,28 @@ pub fn eval(
 				Value::Range(start, end) => {
 					for _ in start..end {
 						for node in body {
-							eval(source, node)?;
+							eval(source, node, variables)?;
 						}
 					}
 				}
 				_ => {}
+			}
+		}
+		Node::Variable(name, value) => {
+			let val = eval(source, value, variables)?;
+
+			variables.insert(name.to_string(), val);
+		}
+		Node::Ident(ident) => {
+			let var = variables.get(ident);
+
+			if let Some(var) = var {
+				return Ok(var.clone());
+			} else {
+				return Err((
+					EvaluationError::VariableNotFound(ident.to_string()),
+					node.1.clone(),
+				));
 			}
 		}
 		n => panic!("not implemented: {:?}", n),
